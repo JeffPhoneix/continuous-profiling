@@ -44,7 +44,7 @@
 </p>
 <p align="center"><sub>读路径示意图</sub></p>
 
-* 进入 Pyroscope 的查询会到达查询前端组件(query-frontend)，该组件负责加速查询并将其分发给查询调度器(query-scheduler)。
+* 进入 Pyroscope 的查询会到达query-frontend组件(query-frontend)，该组件负责加速查询并将其分发给查询调度器(query-scheduler)。
 * 查询调度器(query-scheduler)维护一个查询队列，并确保每个租户的查询都能得到公平执行。
 * 查询器(queriers)充当工作进程，从查询调度器的队列中提取查询。
   * 查询器(queriers)连接到ingesters，以获取执行查询所需的所有数据。
@@ -112,7 +112,7 @@ Pyroscope 包含一系列相互协作以形成集群的组件。
 
 ### distributor
 
-* distributor 是一个无状态组件，它从代理接收分析数据。
+* distributor 是一个无状态组件，它从agent接收分析数据。
 * distributor 将数据分成多个批次，并行发送到多个ingester，并将数据series分片(shards)到各个 ingester ，并按照配置的复制因子复制每个序列。
   * 默认情况下，配置的复制因子为 3。
 
@@ -234,13 +234,81 @@ Pyroscope 包含一系列相互协作以形成集群的组件。
 
 ### querier
 
+* querier是一个无状态组件
+* 它通过获取读取路径上的profiles series和labels来对查询表达式进行计算
+* querier使用ingesters 收集最近写入的数据，并使用store-gateways进行长期存储。
+
+#### 连接到 ingesters
+
+* 您必须使用与配置ingesters相同的 `-ingester.ring.*` 标志（或其各自的 YAML 配置参数）来配置querier，以便querier可以访问ingesters哈希环并发现ingesters的地址。
+
 ### query-frontend
 
+* query-frontend是一个无状态组件，它提供与 querier相同的 API
+  * 可用于加速读取路径，并通过 query-scheduler 确保租户之间的公平调度。
+* 在这种情况下，queriers充当工作进程，从队列中拉取任务，执行任务，并将结果返回给query-frontend进行聚合。
+* 出于高可用性的考虑，我们建议您至少运行两个query-frontend副本。
+* 由于使用query-frontend时必须同时运行query-scheduler，因此您必须至少运行一个query-scheduler副本。
+* 以下步骤描述了查询如何在query-frontend中流转。
+  * query-frontend接收查询
+  * query-frontend通过与query-scheduler通信，将查询放入队列中，等待querier领取。
+  * querier从队列中领取查询并执行它。
+  * querier将结果返回给query-frontend，然后query-frontend汇总结果并将其转发给客户端。
+
 ### query-scheduler
+
+* 查询调度器是一个无状态组件，它维护一个待执行查询队列，并将工作负载分配给可用的查询器。
+* 使用query-frontend时，查询调度器是必需组件。
+
+![查询](./images/query-scheduler-architecture.png)
+
+* 以下流程描述了一次查询在 Pyroscope 集群中的流转过程：
+  * query-frontend(query-frontend)接收查询，然后将其拆分和分片，或从缓存中提供服务。
+  * query-frontend(query-frontend)将查询放入查询调度器的队列中。
+  * 查询调度器(query-scheduler)将查询存储在内存队列中，等待查询器(querier)领取。
+  * 查询器(querier)领取查询并执行。
+  * 查询器(querier)将结果发送回query-frontend(query-frontend)，query-frontend(query-frontend)再将结果转发给客户端。
+
+#### 使用query-scheduler的优势
+
+* 查询调度器支持query-frontend的扩容。
+
+#### 配置
+
+* 要使用查询调度器，query-frontend和查询器需要发现查询调度器实例的地址。
+* 查询调度器使用基于环的服务发现机制来发布自身，该机制通过成员列表配置进行配置。
+
+#### 运维注意事项
+
+* 为了实现高可用性，请运行两个查询调度器副本。
 
 ## bucket index
 
 ## Block format
+
+* 本文档描述了 Pyroscope 如何将数据存储在其数据块中。
+  * 每个数据块(block)属于一个租户，并由唯一的 ULID 标识。
+    * [ULID](https://github.com/ulid/spec)
+  * 数据块(block)内包含多个文件：
+    * 元数据文件 meta.json
+      * 其中包含有关数据块内容的信息
+      * 例如profiling数据的时间范围
+    * TSDB 索引 index.tsdb
+      * 将外部标签映射到存储在 profiles 表中的profiles
+    * profiles.parquet
+      * 包含profiles的 Parquet 表
+    * symbols.symdb
+      * 包含存储在block的profiles的符号信息。
+
+### 数据模型
+
+* block内的数据模型与 Google 的 pprof wire format的 proto 定义基本一致。
+* Profile series labels 包含在数据ingestion时收集的附加信息，可用于选择特定的profiles。
+  * 它们类似于 Prometheus/Loki labels，典型的labels名称为namespace和 Pod，用于描述profiles来自哪个工作负载。
+* 每个ingested的profile都会添加到 profile 表中的新行中。
+  * 如果不同型号的表格中缺少条目，也会将其插入。
+
+![数据模型](./images/data-model.svg)
 
 ## hash rings
 
