@@ -259,78 +259,82 @@ Pyroscope 包含一系列相互协作以形成集群的组件。
     * 对于每个组，compactor会compaction块，但不会生成单个结果块，而是输出 M 个块（-compactor.split-and-merge-shards），称为拆分块(split blocks)。
     * 每个拆分块(split block)仅包含 M 个分片(shards)中给定分片的序列的子集。
     * 在拆分阶段结束时，compactor会生成 N * M 个blocks，并在每个block的 meta.json 文件中包含指向其对应分片(shard)的引用。
-  * compactor会合并每个分片(shard)的拆分数据块(split blocks)
-    * 这将compaction给定分片(shard)的所有 N 个拆分数据块
-    * 合并操作会将数据块(block)的数量从 N * M 减少到 M
+  * compactor会合并每个分片(shard)的拆分block(split blocks)
+    * 这将compaction给定分片(shard)的所有 N 个拆分block
+    * 合并操作会将block(block)的数量从 N * M 减少到 M
     * 在给定的compaction时间范围内，每个分片(shard)都会有一个已compaction的block。
 
 ![compactor-split-and-merge](./images/compactor-split-and-merge.png)
 
-合并操作随后会根据其他配置的compaction时间范围（例如 1 小时和 4 小时）运行。它会compaction属于同一分片的块。
-
-此策略适用于拥有大量租户的集群。分片数 M 可通过 `-compactor.split-and-merge-shards` 为每个租户单独配置，并可根据每个租户的序列数进行调整。租户的序列越多，可配置的分片数就越多。这样做可以提高compaction并行化程度，并控制每个分片compaction块的大小。
-
-拆分组数 N 也可通过 `-compactor.split-groups` 为每个租户单独调整。增加此值会在拆分阶段生成更多块数更少的compaction作业。这使得多个compactor可以同时处理这些作业，从而更快地完成拆分阶段。但是，增加这个值也会在分裂阶段产生更多的中间块，这些中间块只能在合并阶段减少。
-
-如果在compaction过程中 `-compactor.split-and-merge-shards` 的配置发生更改，则该更改只会影响尚未拆分的数据块的compaction。已拆分的数据块在合并时将使用原始配置。原始配置存储在每个拆分数据块的 meta.json 文件中。
-
-拆分和合并操作可以水平扩展。不冲突且不重叠的作业将并行执行。
+* 合并操作随后会根据其他配置的compaction时间范围（例如 1 小时和 4 小时）运行。
+  * 它会compaction属于同一分片(shard)的块(blocks)。
+* 此策略适用于拥有大量租户的集群。
+  * 分片数 M 可通过 `-compactor.split-and-merge-shards` 为每个租户单独配置，并可根据每个租户的序列数进行调整。
+  * 租户的序列越多，配置的分片数(shards)越多。
+    * 这样做可以提高compaction并行化程度，并控制每shard的compaction块的大小。
+* 拆分组数 N 也可通过 `-compactor.split-groups` 为每个租户单独调整。
+  * 增加此值会在拆分阶段生成更多块数更少的compaction作业。
+  * 这使得多个compactor可以同时处理这些作业，从而更快地完成拆分阶段。
+  * 但是，增加这个值也会在分裂阶段产生更多的中间块，这些中间块只能在合并阶段减少。
+* 如果在compaction过程中 `-compactor.split-and-merge-shards` 的配置发生更改，则该更改只会影响尚未拆分的block的compaction。
+  * 已拆分的block在合并时将使用原始配置。
+  * 原始配置存储在每个拆分block的 meta.json 文件中。
+* 拆分和合并操作可以水平扩容
+  * 不冲突且不重叠的jobs将并行执行。
 
 #### compactor分片
 
-compactor会对来自单个租户或多个租户的compaction作业进行分片。单个租户的compaction作业可以拆分并由多个compactor实例处理。
-
-当compactor池增大或缩小时，租户和作业会自动重新分片到可用的compactor实例上，无需任何人工干预。
-
-compactor分片使用哈希环。启动时，compactor会生成随机令牌并将其自身注册到compactor哈希环中。运行期间，它会按照 `-compactor.compaction-interval` 定义的时间间隔定期扫描存储桶，以发现存储中的租户列表，并compaction每个租户的、哈希值与分配给该实例的令牌范围相匹配的数据块。
-
-要配置compactor的哈希环，请参阅配置成员列表。
+* compactor会对来自单个租户或多个租户的compaction作业(job)进行分片
+  * 单个租户的compaction作业可以拆分并由多个compactor实例处理
+* 当compactor池增大或缩小时，租户和作业会自动重新分片(reshard)到可用的compactor实例上，无需任何人工干预。
+* compactor分片使用哈希环
+  * 启动时，compactor会生成随机令牌并将其自身注册到compactor哈希环中
+  * 运行期间，它会按照 `-compactor.compaction-interval` 定义的时间间隔定期扫描存储桶(storage bucket)，以发现存储中的租户列表，并compaction每个租户的、哈希值与分配给该实例的令牌范围相匹配的block。
 
 #### 启动时等待稳定的哈希环
 
-集群冷启动或同时增加两个或多个compactor实例可能会导致每个新compactor实例的启动时间略有不同。然后，​​每个compactor基于不同的哈希环状态运行其首次compaction。这并非错误情况，但效率可能较低，因为多个compactor实例可能几乎同时开始compaction同一租户。
-
-为了缓解此问题，可以将compactor配置为在启动时等待稳定的哈希环。如果在至少 `-compactor.ring.wait-stability-min-duration` 的时间内没有向哈希环添加或从中移除任何实例，则认为哈希环稳定。compactor等待的最大时间由标志 `-compactor.ring.wait-stability-max-duration`（或相应的 YAML 配置选项）控制。一旦compactor完成等待（无论是由于哈希环稳定还是由于达到最大等待时间），它将正常启动。
-
--compactor.ring.wait-stability-min-duration 的默认值为零时，将禁用等待环稳定性。
+* 集群冷启动或同时增加两个或多个compactor实例可能会导致每个新compactor实例的启动时间只是略有不同
+  * 然后，​​每个compactor基于不同的哈希环状态运行其首次compaction
+  * 这并非错误情况，但效率可能较低，因为多个compactor实例可能几乎同时开始compaction同一租户。
+* 为了缓解此问题，可以将compactor配置为在启动时等待稳定的哈希环
+  * 如果在至少 `-compactor.ring.wait-stability-min-duration` 的时间内没有向哈希环添加或从中移除任何实例，则认为哈希环稳定
+  * compactor等待的最大时间由标志 `-compactor.ring.wait-stability-max-duration`（或相应的 YAML 配置选项）控制
+  * 一旦compactor完成等待（无论是由于哈希环稳定还是由于达到最大等待时间），它将正常启动。
+* `-compactor.ring.wait-stability-min-duration` 的默认值为零时，将禁用等待环稳定性。
 
 #### compaction job顺序
 
-compaction任务顺序
-
-compactor允许通过 `-compactor.compaction-jobs-order` 标志（或其对应的 YAML 配置选项）配置compaction任务顺序。配置的顺序定义了哪些compaction任务应该首先执行。支持以下 `-compactor.compaction-jobs-order` 值：
-
-最小范围最旧块优先（默认值）
-
-此顺序优先处理范围最小、最旧的块。
-
-例如，如果compaction范围为 1 小时、4 小时和 8 小时，compactor将首先compaction 1 小时范围的数据块，并优先处理其中最旧的块。compaction完 1 小时范围内的所有块后，它将处理 2 小时范围的数据块，最后处理 8 小时范围的数据块。
-
-所有拆分任务都会被移到工作队列的前端，因为在给定的时间范围内完成所有拆分任务可以解除合并任务的阻塞。
-
-最新块优先
-
-此排序方式优先处理最新的时间范围，无论其compaction级别如何。
-
-例如，compaction范围为 1 小时、4 小时和 8 小时，compactor会首先compaction最新的块（直至 8 小时范围），然后再compaction更早的块。此策略优先处理最新的块，因为它们的查询频率最高。
+* compactor允许通过 `-compactor.compaction-jobs-order` 标志（或其对应的 YAML 配置选项）配置compaction job顺序
+  * 配置的顺序定义了哪些compaction任务应该首先执行
+  * 支持以下 `-compactor.compaction-jobs-order` 值：
+    * smallest-range-oldest-blocks-first 最小范围最旧块优先（默认值）
+      * 此顺序优先处理范围最小、最旧的块。
+      * 例如
+        * 如果compaction范围为 1 小时、4 小时和 8 小时，compactor将首先compaction 1 小时范围的block，并优先处理其中最旧的块
+        * compaction完 1 小时范围内的所有块后，它将处理 2 小时范围的block，最后处理 8 小时范围的block。
+      * 所有拆分任务都会被移到工作队列的前端，因为在给定的时间范围内完成所有拆分任务可以解除合并任务的阻塞。
+    * newest-blocks-first 最新块优先
+      * 此排序方式优先处理最新的时间范围，无论其compaction级别如何。
+      * 例如
+        * compaction范围为 1 小时、4 小时和 8 小时，compactor会首先compaction最新的块（直至 8 小时范围），然后再compaction更早的块
+        * 此策略优先处理最新的块，因为它们的查询频率最高。
 
 #### 块删除
 
-成功完成compaction后，原始数据块将从存储中删除。数据块删除并非立即执行，而是分两步进行：
-
-首先，将原始数据块标记为待删除；这称为软删除。
-
-当数据块被标记为待删除的时间超过可配置的 `-compactor.deletion-delay` 值后，该数据块将从存储中删除；这称为硬删除。
-
-compactor负责标记数据块和执行硬删除操作。软删除基于存储在存储桶中数据块位置的一个名为 `delete-mark.json` 的小型文件。
-
-软删除机制允许查询器和存储网关在原始数据块被删除之前有时间发现新的compaction数据块。如果立即硬删除这些原始数据块，则某些涉及compaction数据块的查询可能会暂时失败或返回部分结果。
+* 成功完成compaction后，原始block将从存储中删除
+* block删除并非立即执行，而是分两步进行：
+  * 首先，将原始block标记为待删除；这称为软删除。
+    * 软删除基于存储在bucket中block位置的一个名为 `delete-mark.json` 的小型文件
+  * 当block被标记为待删除的时间超过可配置的 `-compactor.deletion-delay` 值后，该block将从存储中删除；这称为硬删除。
+* compactor负责标记block和执行硬删除操作
+* 软删除机制允许 queriers 和 store-gateways 在原始block被删除之前有时间发现新的已经compacted block
+  * 如果立即硬删除这些原始block，则某些涉及compacted block的查询可能会暂时失败或返回部分结果。
 
 #### compaction磁盘利用率
 
-compactor需要将数据块从存储桶下载到本地磁盘，并且需要将compaction后的数据块存储到本地磁盘，然后再上传到存储桶。最大的租户可能需要大量的磁盘空间。
-
-假设 `max_compaction_range_blocks_size` 是最大租户在最长 `-compactor.block-ranges` 周期内的总数据块大小，则估算所需最小磁盘空间的表达式为：
+* compactor需要将block从bucket下载到本地磁盘，并且需要将compaction后的block存储到本地磁盘，然后再上传到bucket
+  * 最大的租户可能需要大量的磁盘空间
+* 假设 `max_compaction_range_blocks_size` 是最大租户在最长 `-compactor.block-ranges` 周期内的总block大小，则估算所需最小磁盘空间的表达式为：
 
 ```text
 compactor.compaction-concurrency * max_compaction_range_blocks_size * 2
@@ -395,12 +399,12 @@ compactor.compaction-concurrency * max_compaction_range_blocks_size * 2
 ### 优势
 
 * 存储网关(store-gateways)必须拥有几乎最新的存储桶(storage bucket)的视图，以便在查询时找到要查找的正确block并加载block。
-  * Ingesters 会定期向存储桶添加新block，同时将数据卸载到长期存储中。
+  * Ingesters 会定期向bucket添加新block，同时将数据卸载到长期存储中。
   * compactor随后会compaction这些block，并将原始block标记为待删除。
   * 实际删除操作会在与参数 `-compactor.deletion-delay` 关联的延迟值之后执行。
   * 尝试获取已删除的block会导致查询失败。
   * 因此，在此上下文中，“几乎最新”的视图是指其过时时间小于 `-compactor.deletion-delay` 值的视图。
-* 因此，存储网关(store-gateways)需要定期扫描存储桶，以查找由ingester或compactor上传的新block，以及由compactor删除（或标记为删除）的block。
+* 因此，存储网关(store-gateways)需要定期扫描bucket，以查找由ingester或compactor上传的新block，以及由compactor删除（或标记为删除）的block。
 * 启用bucket index(bucket index)后，存储网关(store-gateways)会定期查找租户级bucket index(bucket index)，而不是通过“列出对象(list objects)”操作扫描存储桶(bucket)。
 * 这带来了以下优势：
   * 减少存储网关对对象存储的 API 调用次数
